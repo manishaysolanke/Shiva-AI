@@ -1,0 +1,159 @@
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+model User {
+  id                 String              @id @default(cuid())
+  email              String              @unique
+  name               String?
+  avatar             String?
+  passwordHash       String?
+  role               String              @default("USER") // USER, ADMIN
+  createdAt          DateTime            @default(now())
+  updatedAt          DateTime            @updatedAt
+
+  subscription       Subscription?
+  creditBalance      CreditBalance?
+  creditTransactions CreditTransaction[]
+  generations        Generation[]
+  generatedImages    GeneratedImage[]
+  favorites          Favorite[]
+  savedPrompts       SavedPrompt[]
+  safetyLogs         SafetyLog[]
+}
+
+model Subscription {
+  id                     String    @id @default(cuid())
+  userId                 String    @unique
+  user                   User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  plan                   String    @default("FREE") // FREE, WEEKLY, MONTHLY
+  status                 String    @default("ACTIVE") // ACTIVE, CANCELLED, PAST_DUE, EXPIRED
+  priceAmount            Int       @default(0) // in INR ₹
+  razorpaySubscriptionId String?
+  razorpayOrderId        String?
+  currentPeriodStart     DateTime  @default(now())
+  currentPeriodEnd       DateTime?
+  cancelAtPeriodEnd      Boolean   @default(false)
+  createdAt              DateTime  @default(now())
+  updatedAt              DateTime  @updatedAt
+}
+
+model CreditBalance {
+  id                 String   @id @default(cuid())
+  userId             String   @unique
+  user               User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  currentBalance     Int      @default(50)
+  dailyAllowance     Int      @default(50)
+  lastCreditRefresh  DateTime @default(now())
+  totalCreditsUsed   Int      @default(0)
+  totalGenerations   Int      @default(0)
+  updatedAt          DateTime @updatedAt
+}
+
+model CreditTransaction {
+  id            String   @id @default(cuid())
+  userId        String
+  user          User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  amount        Int      // Positive for credit (+50), Negative for spend (-5, -7, -9)
+  balanceAfter  Int
+  type          String   // DAILY_REFRESH, GENERATION, REFUND, SUBSCRIPTION_BONUS, ADMIN_ADJUSTMENT
+  description   String
+  generationId  String?
+  createdAt     DateTime @default(now())
+
+  @@index([userId, createdAt])
+}
+
+model Generation {
+  id              String           @id @default(cuid())
+  userId          String
+  user            User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  prompt          String
+  refinedPrompt   String?
+  negativePrompt  String?
+  style           String           @default("Photorealistic")
+  aspectRatio     String           @default("1:1")
+  quality         String           @default("Standard") // Standard, High, Ultra
+  creditsUsed     Int              @default(5)
+  status          String           @default("COMPLETED") // PENDING, PROCESSING, COMPLETED, FAILED
+  provider        String           @default("procedural")
+  providerGenId   String?
+  errorMessage    String?
+  images          GeneratedImage[]
+  createdAt       DateTime         @default(now())
+  completedAt     DateTime?
+
+  @@index([userId, createdAt])
+}
+
+model GeneratedImage {
+  id           String     @id @default(cuid())
+  generationId String
+  generation   Generation @relation(fields: [generationId], references: [id], onDelete: Cascade)
+  userId       String
+  user         User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  imageUrl     String
+  thumbnail    String?
+  storageKey   String?
+  width        Int        @default(1024)
+  height       Int        @default(1024)
+  isPublic     Boolean    @default(true)
+  isFeatured   Boolean    @default(false)
+  favorites    Favorite[]
+  createdAt    DateTime   @default(now())
+
+  @@index([userId, createdAt])
+  @@index([isFeatured, createdAt])
+}
+
+model Favorite {
+  id        String         @id @default(cuid())
+  userId    String
+  user      User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  imageId   String
+  image     GeneratedImage @relation(fields: [imageId], references: [id], onDelete: Cascade)
+  createdAt DateTime       @default(now())
+
+  @@unique([userId, imageId])
+}
+
+model SavedPrompt {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  title     String
+  prompt    String
+  style     String?
+  tags      String?
+  createdAt DateTime @default(now())
+}
+
+model PaymentEvent {
+  id           String   @id @default(cuid())
+  eventId      String   @unique
+  provider     String   @default("razorpay")
+  eventType    String
+  amount       Int
+  currency     String   @default("INR")
+  status       String   @default("PROCESSED")
+  payloadJson  String
+  processedAt  DateTime @default(now())
+}
+
+model SafetyLog {
+  id           String   @id @default(cuid())
+  userId       String?
+  user         User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+  prompt       String
+  flagged      Boolean  @default(false)
+  flagCategory String?
+  riskLevel    String   @default("LOW")
+  actionTaken  String   @default("ALLOWED")
+  ipAddress    String?
+  createdAt    DateTime @default(now())
+}
