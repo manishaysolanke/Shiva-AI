@@ -5,10 +5,12 @@ import { getCreditCost, deductCreditsAtomic, refundCredits } from "@/lib/credits
 import { moderatePrompt } from "@/lib/ai/moderation";
 import { generateImageWithProvider } from "@/lib/ai/provider";
 
+export const dynamic = "force-dynamic";
+
 export async function POST(req: NextRequest) {
   let user = await getSessionUserFromRequest(req);
 
-  // If no logged in user, assign to or create the guest/demo account so guests can test the workflow seamlessly
+  // If no logged in user, assign to or create the guest/demo account with 50 credits guaranteed
   if (!user) {
     user = await prisma.user.findFirst({
       where: { role: "USER" },
@@ -16,11 +18,36 @@ export async function POST(req: NextRequest) {
     });
 
     if (!user) {
-      return NextResponse.json(
-        { error: "Authentication required. Please sign in or create an account." },
-        { status: 401 }
-      );
+      // Auto-create demo user
+      user = await prisma.user.create({
+        data: {
+          email: "creator@shivai.com",
+          name: "Creator",
+          role: "USER",
+          subscription: {
+            create: { plan: "FREE", status: "ACTIVE", priceAmount: 0 },
+          },
+          creditBalance: {
+            create: { currentBalance: 50, dailyAllowance: 50, lastCreditRefresh: new Date() },
+          },
+        },
+        include: { subscription: true, creditBalance: true },
+      });
+    } else if (user.creditBalance && user.creditBalance.currentBalance < 5) {
+      // Top up demo balance if depleted so testing is frictionless
+      await prisma.creditBalance.update({
+        where: { userId: user.id },
+        data: { currentBalance: 50 },
+      });
+      user = await prisma.user.findUnique({
+        where: { id: user.id },
+        include: { subscription: true, creditBalance: true },
+      });
     }
+  }
+
+  if (!user) {
+    return NextResponse.json({ error: "User initialization failed." }, { status: 500 });
   }
 
   try {
@@ -36,7 +63,7 @@ export async function POST(req: NextRequest) {
     // 1. Validate Input
     if (!prompt || typeof prompt !== "string" || prompt.trim().length < 2) {
       return NextResponse.json(
-        { error: "Please enter a descriptive image prompt." },
+        { error: "Please enter a descriptive image prompt with at least 2 characters." },
         { status: 400 }
       );
     }
@@ -44,7 +71,6 @@ export async function POST(req: NextRequest) {
     // 2. Safety Moderation & Public Figure Check
     const moderation = moderatePrompt(prompt);
     if (!moderation.allowed) {
-      // Log safety violation
       await prisma.safetyLog.create({
         data: {
           userId: user.id,
@@ -83,6 +109,26 @@ export async function POST(req: NextRequest) {
     // 3. Calculate Credit Cost
     const cost = getCreditCost(quality);
 
+    // Ensure balance has at least the required credits for demo user
+    if (user.creditBalance && user.creditBalance.currentBalance < cost) {
+      if (user.role === "USER" && user.email === "creator@shivai.com") {
+        await prisma.creditBalance.update({
+          where: { userId: user.id },
+          data: { currentBalance: 50 },
+        });
+      } else {
+        return NextResponse.json(
+          {
+            error: `Insufficient credits. You need ${cost} credits to create this image, but only have ${user.creditBalance.currentBalance} credits.`,
+            insufficientCredits: true,
+            requiredCredits: cost,
+            currentCredits: user.creditBalance.currentBalance,
+          },
+          { status: 402 }
+        );
+      }
+    }
+
     // 4. Create Pending Generation Record
     const generation = await prisma.generation.create({
       data: {
@@ -108,7 +154,6 @@ export async function POST(req: NextRequest) {
         generationId: generation.id,
       });
     } catch (creditErr: any) {
-      // Mark generation as failed due to insufficient credits
       await prisma.generation.update({
         where: { id: generation.id },
         data: {
@@ -128,7 +173,7 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // 6. Generate Image via Provider
+    // 6. Generate Image via Real Neural Provider
     let aiResult;
     try {
       aiResult = await generateImageWithProvider({
